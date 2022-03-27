@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use std::ops;
-
 const N_LAYERS: usize = 96;
 const D_MODEL: usize = 128 * N_LAYERS;
 const D_MLP: usize = 4 * D_MODEL;
@@ -20,7 +18,11 @@ trait ARModel {
 struct State([f32; D_MODEL]);
 
 impl State {
-    fn merge(&self, right: &State) -> State {
+    fn zero() -> Self {
+        State([0.0; D_MODEL])
+    }
+
+    fn update(&self, right: &Update) -> State {
         let mut out = self.clone();
         for (i, r) in right.0.iter().enumerate() {
             out.0[i] += r;
@@ -28,26 +30,13 @@ impl State {
         out
     }
 
-    fn zero() -> Self {
-        State([0.0; D_MODEL])
-    }
-
-    fn dot(&self, right: &State) -> f32 {
+    fn query(&self, right: &Query) -> f32 {
         dot(&self.0, &right.0)
     }
 }
 
-impl ops::Mul<f32> for &State {
-    type Output = State;
-
-    fn mul(self, rhs: f32) -> Self::Output {
-        let mut out = State::zero();
-        for (i, v) in self.0.iter().enumerate() {
-            out.0[i] = v * rhs;
-        }
-        out
-    }
-}
+type Query = State;
+type Update = State;
 
 fn dot<const N: usize>(l: &[f32; N], r: &[f32; N]) -> f32 {
     let mut out = 0.0;
@@ -71,10 +60,10 @@ impl Embedding {
     }
 }
 
-struct LogitFn(State);
+struct LogitFn(Query);
 impl LogitFn {
     fn apply(&self, st: &State) -> f32 {
-        self.0.dot(st)
+        self.0.query(st)
     }
 }
 
@@ -105,15 +94,15 @@ struct AttnHead {
     W_Q: Box<dyn Fn(&State) -> AttnVector>,
     W_K: Box<dyn Fn(&State) -> AttnVector>,
     W_V: Box<dyn Fn(&State) -> AttnVector>,
-    W_O: Box<dyn Fn(&AttnVector) -> State>,
+    W_O: Box<dyn Fn(&AttnVector) -> Update>,
 }
 
-fn softmax(scores: &mut [f32]) {
+fn softmax(_scores: &mut [f32]) {
     // ...
 }
 
 impl AttnHead {
-    fn apply(&self, states: &[State]) -> Vec<State> {
+    fn apply(&self, states: &[State]) -> Vec<Update> {
         let qs: Vec<AttnVector> = states.iter().map(&self.W_Q).collect();
         let ks: Vec<AttnVector> = states.iter().map(&self.W_K).collect();
         let vs: Vec<AttnVector> = states.iter().map(&self.W_V).collect();
@@ -130,7 +119,7 @@ impl AttnHead {
 
             for (score, val) in scores.iter().zip(vs.iter()) {
                 for (i, v) in val.iter().enumerate() {
-                    values[src][i] += v * score
+                    values[src][i] += v * score;
                 }
             }
         }
@@ -140,8 +129,8 @@ impl AttnHead {
 }
 
 impl AttnLayer {
-    fn apply(&self, states: &[State]) -> Vec<State> {
-        let mut updates: Vec<State> = states.iter().map(|_| State::zero()).collect();
+    fn apply(&self, states: &[State]) -> Vec<Update> {
+        let mut updates: Vec<Update> = states.iter().map(|_| State::zero()).collect();
 
         for h in self.heads.iter() {
             let head_out = h.apply(states);
@@ -149,7 +138,7 @@ impl AttnLayer {
             updates = updates
                 .iter()
                 .zip(head_out.iter())
-                .map(|(l, r)| l.merge(r))
+                .map(|(l, r)| l.update(r))
                 .collect();
         }
 
@@ -158,8 +147,8 @@ impl AttnLayer {
 }
 
 struct Neuron {
-    inp: State,
-    out: State,
+    read: Query,
+    write: Update,
 }
 
 struct MLPLayer {
@@ -168,11 +157,13 @@ struct MLPLayer {
 }
 
 impl MLPLayer {
-    fn apply(&self, state: &State) -> State {
+    fn apply(&self, state: &State) -> Update {
         let mut out = State::zero();
         for mlp in self.mlps.iter() {
-            let unit_out = &mlp.out * (self.nonlinear)(mlp.inp.dot(state));
-            out = out.merge(&unit_out)
+            let pre_act = mlp.read.query(state);
+            let post_act = (self.nonlinear)(pre_act);
+            let unit_out: Update = State(mlp.write.0.map(|f| f * post_act));
+            out = out.update(&unit_out)
         }
         out
     }
@@ -180,18 +171,22 @@ impl MLPLayer {
 
 impl ARModel for Transformer {
     fn apply(&self, tokens: &[Token]) -> Vec<Logits> {
-        let mut states: Vec<_> = tokens.iter().map(|t| self.embedding.apply(*t)).collect();
+        let mut states = tokens
+            .iter()
+            .map(|t| self.embedding.apply(*t))
+            .collect::<Vec<_>>();
 
         for layer in self.layers.iter() {
             let attn_out = layer.attn.apply(&states);
             states = states
                 .iter()
                 .zip(attn_out.iter())
-                .map(|(l, r)| l.merge(r))
+                .map(|(l, r)| l.update(r))
                 .collect();
 
             for i in 0..states.len() {
-                states[i] = states[i].merge(&layer.mlps.apply(&states[i]));
+                let mlp_out = layer.mlps.apply(&states[i]);
+                states[i] = states[i].update(&mlp_out);
             }
         }
 
