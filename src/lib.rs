@@ -2,7 +2,7 @@
 
 const N_LAYERS: usize = 96;
 const D_MODEL: usize = 128 * N_LAYERS;
-const D_MLP: usize = 4 * D_MODEL;
+const N_MLP: usize = 4 * D_MODEL;
 const D_HEAD: usize = 128;
 const N_HEADS: usize = D_MODEL / D_HEAD;
 const N_VOCAB: usize = 50_000;
@@ -172,7 +172,7 @@ struct Neuron {
 }
 
 struct MLPLayer {
-    mlps: [Neuron; D_MLP],
+    mlps: [Neuron; N_MLP],
     nonlinear: fn(f32) -> f32,
 }
 
@@ -214,6 +214,49 @@ impl ARModel for Transformer {
 
         // Then apply the unembedding to get out logits
         states.iter().map(|s| self.unembedding.apply(s)).collect()
+    }
+}
+
+struct AlternateAttnHead {
+    W_QK: Box<dyn Fn(&State, &State) -> f32>,
+    W_OV: Box<dyn Fn(&State) -> Update>,
+}
+
+impl AlternateAttnHead {
+    fn apply(&self, states: &[State]) -> Vec<Update> {
+        let mut output = states
+            .iter()
+            .map(|_| State::zero())
+            .collect::<Vec<Update>>();
+
+        // Iterate over each token position to compute the output at
+        // that position
+        for (src, src_state) in states.iter().enumerate() {
+            // Each position may attend to any earlier position. We
+            // compute an attention "score" between the current
+            // position and each earlier position by applying the QK circuit to both positions
+            let mut scores = Vec::with_capacity(src);
+
+            let visible_indices = 0..=src;
+
+            for i in visible_indices.clone() {
+                scores.push((self.W_QK)(&src_state, &states[i]));
+            }
+
+            softmax(&mut scores);
+
+            // Now we loop over each visible position again, compute
+            // the output update using the OV weight, scale it by the
+            // attention weight, and accumulate.
+            for i in visible_indices {
+                let score = scores[i];
+                let o = (self.W_OV)(&states[i]);
+                let scaled = State(o.0.map(|f| f * score));
+                output[src] = output[src].update(&scaled);
+            }
+        }
+
+        output
     }
 }
 
