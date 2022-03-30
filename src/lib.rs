@@ -17,6 +17,9 @@ trait ARModel {
 #[derive(Clone)]
 struct State([f32; D_MODEL]);
 
+type Query = State;
+type Update = State;
+
 impl State {
     fn zero() -> Self {
         State([0.0; D_MODEL])
@@ -34,9 +37,6 @@ impl State {
         dot(&self.0, &right.0)
     }
 }
-
-type Query = State;
-type Update = State;
 
 fn dot<const N: usize>(l: &[f32; N], r: &[f32; N]) -> f32 {
     let mut out = 0.0;
@@ -103,27 +103,47 @@ fn softmax(_scores: &mut [f32]) {
 
 impl AttnHead {
     fn apply(&self, states: &[State]) -> Vec<Update> {
+        // Apply the Q, K, and V projections to produce Q, K, and V
+        // vectors for each token position.
         let qs: Vec<AttnVector> = states.iter().map(&self.W_Q).collect();
         let ks: Vec<AttnVector> = states.iter().map(&self.W_K).collect();
         let vs: Vec<AttnVector> = states.iter().map(&self.W_V).collect();
 
         let mut values: Vec<_> = states.iter().map(|_| [0.0; D_HEAD]).collect();
 
+        // Iterate over each token position to compute the output at
+        // that position
         for (src, my_q) in qs.iter().enumerate() {
+            // Each position may attend to any earlier position. We
+            // compute an attention "score" between the current
+            // position and each earlier position by dot-producting
+            // our Q vector with their K vector.
             let mut scores = Vec::with_capacity(src);
-            for k in ks[0..=src].iter() {
-                scores.push(dot(my_q, k));
+
+            let visible_indices = 0..=src;
+
+            for i in visible_indices.clone() {
+                scores.push(dot(my_q, &ks[i]));
             }
 
+            // We use a softmax to turn that vector of scores into a
+            // probability distribution
             softmax(&mut scores);
 
-            for (score, val) in scores.iter().zip(vs.iter()) {
-                for (i, v) in val.iter().enumerate() {
-                    values[src][i] += v * score;
+            // Now we loop over each visible position again, weight
+            // their V vector by their attention weight, and sum them
+            // all together.
+            for i in visible_indices {
+                let score = scores[i];
+                let v = vs[i];
+                for (j, vj) in v.iter().enumerate() {
+                    values[src][j] += vj * score;
                 }
             }
         }
 
+        // Now we have a value vector for each position. Use the O
+        // projection to project it up to a full State vector
         values.iter().map(&self.W_O).collect()
     }
 }
@@ -158,7 +178,7 @@ struct MLPLayer {
 
 impl MLPLayer {
     fn apply(&self, state: &State) -> Update {
-        let mut out = State::zero();
+        let mut out: Update = State::zero();
         for mlp in self.mlps.iter() {
             let pre_act = mlp.read.query(state);
             let post_act = (self.nonlinear)(pre_act);
@@ -171,11 +191,13 @@ impl MLPLayer {
 
 impl ARModel for Transformer {
     fn apply(&self, tokens: &[Token]) -> Vec<Logits> {
+        // Embeddings: convert tokens into initial states
         let mut states = tokens
             .iter()
             .map(|t| self.embedding.apply(*t))
             .collect::<Vec<_>>();
 
+        // Pass the hidden state through each layer in turn
         for layer in self.layers.iter() {
             let attn_out = layer.attn.apply(&states);
             states = states
@@ -190,6 +212,7 @@ impl ARModel for Transformer {
             }
         }
 
+        // Then apply the unembedding to get out logits
         states.iter().map(|s| self.unembedding.apply(s)).collect()
     }
 }
