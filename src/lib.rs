@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 const N_LAYERS: usize = 96;
-const D_MODEL: usize = 128 * N_LAYERS;
+const D_MODEL: usize = 12288;
 const D_MLP: usize = 4 * D_MODEL;
 const D_HEAD: usize = 128;
 const N_HEADS: usize = D_MODEL / D_HEAD;
@@ -180,6 +180,8 @@ impl MLPLayer {
     fn apply(&self, state: &State) -> Update {
         let mut out: Update = State::zero();
         for mlp in self.mlps.iter() {
+            // "act" is for "activation", a pretty standard naming
+            // convention
             let pre_act = mlp.read.query(state);
             let post_act = (self.nonlinear)(pre_act);
             let unit_out: Update = State(mlp.write.0.map(|f| f * post_act));
