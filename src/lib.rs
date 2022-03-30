@@ -2,7 +2,7 @@
 
 const N_LAYERS: usize = 96;
 const D_MODEL: usize = 128 * N_LAYERS;
-const N_MLP: usize = 4 * D_MODEL;
+const D_MLP: usize = 4 * D_MODEL;
 const D_HEAD: usize = 128;
 const N_HEADS: usize = D_MODEL / D_HEAD;
 const N_VOCAB: usize = 50_000;
@@ -172,7 +172,7 @@ struct Neuron {
 }
 
 struct MLPLayer {
-    mlps: [Neuron; N_MLP],
+    mlps: [Neuron; D_MLP],
     nonlinear: fn(f32) -> f32,
 }
 
